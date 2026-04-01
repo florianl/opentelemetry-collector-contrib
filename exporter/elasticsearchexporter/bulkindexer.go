@@ -541,6 +541,10 @@ type bulkIndexers struct {
 	profilingStackTraces bulkIndexer // For profiling-stacktraces
 	profilingStackFrames bulkIndexer // For profiling-stackframes
 	profilingExecutables bulkIndexer // For profiling-executables
+	// profilingDataStream is used for normalized profiles-<dataset>-otel data streams.
+	// requireDataStream is intentionally false so that the data stream is auto-created
+	// from the index template on first write, rather than requiring it to pre-exist.
+	profilingDataStream bulkIndexer
 
 	telemetryBuilder *metadata.TelemetryBuilder
 }
@@ -589,6 +593,9 @@ func (b *bulkIndexers) start(
 
 	profilingExecutables := newBulkIndexer(esClient, cfg, false, b.telemetryBuilder, set.Logger, mappingModeNoneErrorHintFunc)
 	b.profilingExecutables = &wgTrackingBulkIndexer{bulkIndexer: profilingExecutables, wg: &b.wg}
+
+	profilingDataStream := newBulkIndexer(esClient, cfg, false, b.telemetryBuilder, set.Logger, mappingModeNoneErrorHintFunc)
+	b.profilingDataStream = &wgTrackingBulkIndexer{bulkIndexer: profilingDataStream, wg: &b.wg}
 	return nil
 }
 
@@ -618,6 +625,11 @@ func (b *bulkIndexers) shutdown(ctx context.Context) error {
 	}
 	if b.profilingExecutables != nil {
 		if err := b.profilingExecutables.Close(ctx); err != nil {
+			return err
+		}
+	}
+	if b.profilingDataStream != nil {
+		if err := b.profilingDataStream.Close(ctx); err != nil {
 			return err
 		}
 	}

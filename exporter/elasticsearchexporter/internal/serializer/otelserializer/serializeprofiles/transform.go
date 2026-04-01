@@ -42,14 +42,20 @@ func Transform(dic pprofile.ProfilesDictionary, resource pcommon.Resource, scope
 	return data, nil
 }
 
+// SampleAndPeriodType returns the profile's sample type (name, unit) and
+// period type (name, unit), resolved via the dictionary's string table.
+func SampleAndPeriodType(dic pprofile.ProfilesDictionary, profile pprofile.Profile) (sampleType, sampleUnit, periodType, periodUnit string) {
+	st := profile.SampleType()
+	pt := profile.PeriodType()
+	return getString(dic, int(st.TypeStrindex())), getString(dic, int(st.UnitStrindex())),
+		getString(dic, int(pt.TypeStrindex())), getString(dic, int(pt.UnitStrindex()))
+}
+
 // checkProfileType acts as safeguard to make sure only known profiles are
 // accepted. Different kinds of profiles are currently not supported
 // and mixing profiles will make profiling information unusable.
 func checkProfileType(dic pprofile.ProfilesDictionary, profile pprofile.Profile) error {
-	sampleType := profile.SampleType()
-
-	sType := getString(dic, int(sampleType.TypeStrindex()))
-	sUnit := getString(dic, int(sampleType.UnitStrindex()))
+	sType, sUnit, pType, pUnit := SampleAndPeriodType(dic, profile)
 
 	// Make sure only on-CPU profiling data is accepted at the moment.
 	// This needs to match with
@@ -59,10 +65,6 @@ func checkProfileType(dic pprofile.ProfilesDictionary, profile pprofile.Profile)
 		return fmt.Errorf("expected sampling type of  [[\"samples\",\"count\"]] "+
 			"but got [[\"%s\", \"%s\"]]", sType, sUnit)
 	}
-
-	periodType := profile.PeriodType()
-	pType := getString(dic, int(periodType.TypeStrindex()))
-	pUnit := getString(dic, int(periodType.UnitStrindex()))
 
 	// Make sure only on-CPU profiling data is accepted at the moment.
 	// This needs to match with
@@ -175,6 +177,85 @@ func stackPayloads(dic pprofile.ProfilesDictionary, resource pcommon.Resource, s
 	return stackPayload, nil
 }
 
+// SampleDSEvents transforms profile into a slice of [SampleDSEvent], one per
+// stacktrace sample timestamp, for the normalized, OTel-native
+// "profiles-<dataset>-otel" data stream. Unlike [Transform], each event is
+// self-contained: stack frames are inlined and the sample value is carried
+// as an explicit field instead of being represented by repeated documents.
+func SampleDSEvents(dic pprofile.ProfilesDictionary, resource pcommon.Resource, scope pcommon.InstrumentationScope, profile pprofile.Profile) ([]SampleDSEvent, error) {
+	if err := checkProfileType(dic, profile); err != nil {
+		return nil, err
+	}
+
+	resourceAttrs := attrMapToStringMap(resource.Attributes())
+	period := profile.Period()
+
+	var events []SampleDSEvent
+	for _, sample := range profile.Samples().All() {
+		frames, frameTypes, _, err := stackFrames(dic, sample)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stackframes: %w", err)
+		}
+		if len(frames) == 0 {
+			continue
+		}
+
+		sampleAttrs, err := pprofile.FromAttributeIndices(dic.AttributeTable(), sample, dic)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve sample attributes: %w", err)
+		}
+		stack := sampleCountFrames(frames, frameTypes)
+
+		for j, t := range sample.TimestampsUnixNano().All() {
+			value := int64(1)
+			if j < sample.Values().Len() {
+				value = sample.Values().At(j)
+			}
+
+			events = append(events, SampleDSEvent{
+				Timestamp:        newUnixTime64(t),
+				Value:            value,
+				Period:           period,
+				Stack:            stack,
+				Attributes:       resourceAttrs,
+				SampleAttributes: attrMapToStringMap(sampleAttrs),
+			})
+		}
+	}
+
+	return events, nil
+}
+
+// attrMapToStringMap converts a [pcommon.Map] into a plain map[string]string,
+// using each value's string representation.
+func attrMapToStringMap(m pcommon.Map) map[string]string {
+	out := make(map[string]string, m.Len())
+	for k, v := range m.All() {
+		out[k] = v.AsString()
+	}
+	return out
+}
+
+// sampleCountFrames converts frames (resolved by [stackFrames], ordered
+// root-first) and frameTypes (ordered leaf-first, one per frame) into a
+// root-first slice of [SampleCountFrame] for embedding into a
+// [SampleDSEvent]. frames[i] pairs with frameTypes[len(frames)-1-i].
+func sampleCountFrames(frames []StackFrame, frameTypes []libpf.FrameType) []SampleCountFrame {
+	n := len(frames)
+	out := make([]SampleCountFrame, n)
+	for i, f := range frames {
+		out[i] = SampleCountFrame{
+			FunctionName: f.FunctionName,
+			FileName:     f.FileName,
+			LineNumber:   f.LineNumber,
+		}
+		if j := n - 1 - i; j >= 0 && j < len(frameTypes) {
+			out[i].FrameType = frameTypes[j].String()
+		}
+	}
+	return out
+}
+
 func unsymbolizedExecutables(executables map[libpf.FileID]struct{}) []UnsymbolizedExecutable {
 	now := time.Now()
 	unsymbolized := make([]UnsymbolizedExecutable, 0, len(executables))
@@ -242,6 +323,16 @@ func stackTraceEvent(dic pprofile.ProfilesDictionary, traceID string, sample ppr
 	}
 
 	// Store event-specific attributes.
+	if threadName, ok := sampleAttributeValue(dic, sample, conventions.ThreadNameKey); ok {
+		event.ThreadName = threadName
+	}
+
+	return event
+}
+
+// sampleAttributeValue looks up a sample-level attribute by key, resolving
+// it from the profile's attribute table.
+func sampleAttributeValue(dic pprofile.ProfilesDictionary, sample pprofile.Sample, wantKey attribute.Key) (string, bool) {
 	for _, idx := range sample.AttributeIndices().All() {
 		if dic.AttributeTable().Len() < int(idx) {
 			continue
@@ -249,12 +340,11 @@ func stackTraceEvent(dic pprofile.ProfilesDictionary, traceID string, sample ppr
 		attr := dic.AttributeTable().At(int(idx))
 		key := dic.StringTable().At(int(attr.KeyStrindex()))
 
-		if attribute.Key(key) == conventions.ThreadNameKey {
-			event.ThreadName = attr.Value().AsString()
+		if attribute.Key(key) == wantKey {
+			return attr.Value().AsString(), true
 		}
 	}
-
-	return event
+	return "", false
 }
 
 func stackTrace(stackTraceID string, frames []StackFrame, frameTypes []libpf.FrameType) StackTrace {

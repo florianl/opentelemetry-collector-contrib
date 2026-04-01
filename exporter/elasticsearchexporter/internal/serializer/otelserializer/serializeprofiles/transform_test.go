@@ -1113,3 +1113,98 @@ func checkAndResetTimes(payloads []StackPayload) error {
 func isWithinLastSecond(t time.Time) bool {
 	return time.Since(t) < time.Second
 }
+
+func TestSampleCountFrames(t *testing.T) {
+	// frames is root-first: frames[0] is the outermost (root) frame,
+	// frames[1] is the innermost (leaf) frame. frameTypes is leaf-first, the
+	// order stackFrames() encounters locations in: frameTypes[0] is the leaf's
+	// type, frameTypes[1] is the root's type.
+	frames := []StackFrame{
+		{FunctionName: []string{"root_fn"}},
+		{FunctionName: []string{"leaf_fn"}},
+	}
+	frameTypes := []libpf.FrameType{
+		libpf.NativeFrame,
+		libpf.PythonFrame,
+	}
+
+	got := sampleCountFrames(frames, frameTypes)
+
+	require.Len(t, got, 2)
+	assert.Equal(t, []string{"root_fn"}, got[0].FunctionName)
+	assert.Equal(t, libpf.PythonFrame.String(), got[0].FrameType)
+	assert.Equal(t, []string{"leaf_fn"}, got[1].FunctionName)
+	assert.Equal(t, libpf.NativeFrame.String(), got[1].FrameType)
+}
+
+func TestSampleDSEvents(t *testing.T) {
+	dic := pprofile.NewProfilesDictionary()
+	dic.StringTable().Append("samples", "count", "cpu", "nanoseconds")
+
+	a := dic.AttributeTable().AppendEmpty()
+	a.SetKeyStrindex(4)
+	dic.StringTable().Append("profile.frame.type")
+	a.Value().SetStr("native")
+
+	a = dic.AttributeTable().AppendEmpty()
+	a.SetKeyStrindex(5)
+	dic.StringTable().Append("thread.name")
+	a.Value().SetStr("worker-1")
+
+	dic.MappingTable().AppendEmpty()
+	l := dic.LocationTable().AppendEmpty()
+	l.SetAddress(address)
+	l.AttributeIndices().Append(0)
+	stack := dic.StackTable().AppendEmpty()
+	stack.LocationIndices().Append(0)
+
+	rp := pprofile.NewResourceProfiles()
+	rp.Resource().Attributes().PutStr("service.name", "svc")
+	sp := rp.ScopeProfiles().AppendEmpty()
+	p := sp.Profiles().AppendEmpty()
+
+	st := p.SampleType()
+	st.SetTypeStrindex(0)
+	st.SetUnitStrindex(1)
+	pt := p.PeriodType()
+	pt.SetTypeStrindex(2)
+	pt.SetUnitStrindex(3)
+	p.SetPeriod(1e9 / 20)
+
+	s := p.Samples().AppendEmpty()
+	s.TimestampsUnixNano().Append(0, 1_000_000_000)
+	s.Values().Append(2, 5)
+	s.SetStackIndex(0)
+	s.AttributeIndices().Append(1)
+
+	events, err := SampleDSEvents(dic, rp.Resource(), sp.Scope(), p)
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+
+	assert.Equal(t, newUnixTime64(0), events[0].Timestamp)
+	assert.Equal(t, int64(2), events[0].Value)
+	assert.Equal(t, int64(1e9/20), events[0].Period)
+	assert.Equal(t, map[string]string{"service.name": "svc"}, events[0].Attributes)
+	assert.Equal(t, map[string]string{"thread.name": "worker-1"}, events[0].SampleAttributes)
+	assert.Len(t, events[0].Stack, 1)
+
+	assert.Equal(t, newUnixTime64(1_000_000_000), events[1].Timestamp)
+	assert.Equal(t, int64(5), events[1].Value)
+	assert.Equal(t, int64(1e9/20), events[1].Period)
+}
+
+func TestSampleDSEvents_InvalidProfileType(t *testing.T) {
+	dic := pprofile.NewProfilesDictionary()
+	dic.StringTable().Append("off-CPU", "events")
+
+	rp := pprofile.NewResourceProfiles()
+	sp := rp.ScopeProfiles().AppendEmpty()
+	p := sp.Profiles().AppendEmpty()
+	st := p.SampleType()
+	st.SetTypeStrindex(0)
+	st.SetUnitStrindex(1)
+
+	events, err := SampleDSEvents(dic, rp.Resource(), sp.Scope(), p)
+	require.Error(t, err)
+	assert.Nil(t, events)
+}

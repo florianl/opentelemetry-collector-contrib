@@ -146,6 +146,9 @@ func TestConfig(t *testing.T) {
 				TelemetrySettings: TelemetrySettings{
 					LogFailedDocsInputRateLimit: time.Second,
 				},
+				ProfilesSampleCountDataStream: ProfilesSampleCountDataStreamSettings{
+					Enabled: true,
+				},
 			},
 		},
 		{
@@ -223,6 +226,9 @@ func TestConfig(t *testing.T) {
 				TelemetrySettings: TelemetrySettings{
 					LogFailedDocsInputRateLimit: time.Second,
 				},
+				ProfilesSampleCountDataStream: ProfilesSampleCountDataStreamSettings{
+					Enabled: true,
+				},
 			},
 		},
 		{
@@ -299,6 +305,9 @@ func TestConfig(t *testing.T) {
 				},
 				TelemetrySettings: TelemetrySettings{
 					LogFailedDocsInputRateLimit: time.Second,
+				},
+				ProfilesSampleCountDataStream: ProfilesSampleCountDataStreamSettings{
+					Enabled: true,
 				},
 			},
 		},

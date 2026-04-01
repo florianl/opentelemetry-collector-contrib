@@ -157,7 +157,10 @@ type documentEncoder interface {
 	// encoders that need custom routing return a different index than the one passed in.
 	encodeSpanEvent(encodingContext, ptrace.Span, ptrace.SpanEvent, elasticsearch.Index, *bytes.Buffer) (elasticsearch.Index, error)
 	encodeMetrics(_ encodingContext, _ []datapoints.DataPoint, validationErrors *[]error, _ elasticsearch.Index, _ *bytes.Buffer) (map[string]string, error)
-	encodeProfile(_ encodingContext, _ pprofile.ProfilesDictionary, _ pprofile.Profile, _ func(*bytes.Buffer, string, string) error) error
+	// encodeProfile encodes the profile, calling pushData for each generated document. If
+	// includeSampleCountDataStream is true, a normalized copy is additionally pushed to a
+	// profiles-<dataset>-otel data stream.
+	encodeProfile(_ encodingContext, _ pprofile.ProfilesDictionary, _ pprofile.Profile, includeSampleCountDataStream bool, _ func(*bytes.Buffer, string, string) error) error
 }
 
 type encodingContext struct {
@@ -401,9 +404,10 @@ func (e otelModeEncoder) encodeProfile(
 	ec encodingContext,
 	dic pprofile.ProfilesDictionary,
 	profile pprofile.Profile,
+	includeSampleCountDataStream bool,
 	pushData func(*bytes.Buffer, string, string) error,
 ) error {
-	return e.serializer.SerializeProfile(dic, ec.resource, ec.scope, profile, pushData)
+	return e.serializer.SerializeProfile(dic, ec.resource, ec.scope, profile, includeSampleCountDataStream, pushData)
 }
 
 func (bodymapModeEncoder) encodeLog(
@@ -448,7 +452,7 @@ type profilesUnsupportedEncoder struct {
 }
 
 func (e profilesUnsupportedEncoder) encodeProfile(
-	_ encodingContext, _ pprofile.ProfilesDictionary, _ pprofile.Profile, _ func(*bytes.Buffer, string, string) error,
+	_ encodingContext, _ pprofile.ProfilesDictionary, _ pprofile.Profile, _ bool, _ func(*bytes.Buffer, string, string) error,
 ) error {
 	return fmt.Errorf("mapping mode %q (%d) does not support profiles", e.mode, int(e.mode))
 }

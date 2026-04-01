@@ -486,6 +486,26 @@ exporters:
 > See [the Universal Profiling getting started documentation](https://www.elastic.co/guide/en/observability/current/profiling-get-started.html)
 > You will need to use the Elasticsearch endpoint, with an [Elasticsearch API key](https://www.elastic.co/guide/en/kibana/current/api-keys.html).
 
+### Profiles normalized data stream
+
+In addition to the Universal Profiling indices described above, each profiling sample is
+also written, self-contained (with its resolved stack inlined and its real sample value),
+to a normalized, OTel-native data stream named `profiles-<dataset>-otel`. `<dataset>` is
+derived from the profile's period type and sample type, e.g. `cpu_samples_count` for
+on-CPU profiles. Resource and sample attributes are flattened directly into the document.
+
+This is controlled by `profiles_sample_count_data_stream::enabled`, which defaults to `true`:
+
+```yaml
+exporters:
+  elasticsearch:
+    endpoint: https://elastic.example.com:9200
+    mapping:
+      mode: otel
+    profiles_sample_count_data_stream:
+      enabled: true
+```
+
 [confighttp]: https://github.com/open-telemetry/opentelemetry-collector/tree/main/config/confighttp/README.md#http-configuration-settings
 [configtls]: https://github.com/open-telemetry/opentelemetry-collector/blob/main/config/configtls/README.md#tls-configuration-settings
 [configauth]: https://github.com/open-telemetry/opentelemetry-collector/blob/main/config/configauth/README.md#authentication-configuration

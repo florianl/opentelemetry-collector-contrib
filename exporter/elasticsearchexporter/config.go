@@ -124,6 +124,12 @@ type Config struct {
 	// Keys are case-insensitive and duplicates will trigger a validation error.
 	MetadataKeys []string `mapstructure:"metadata_keys"`
 
+	// ProfilesSampleCountDataStream configures whether profiles are additionally
+	// written, in a normalized/OTel-native form, to a "profiles-<dataset>-otel"
+	// data stream, on top of the existing Universal Profiling indices (which are
+	// unaffected by this setting).
+	ProfilesSampleCountDataStream ProfilesSampleCountDataStreamSettings `mapstructure:"profiles_sample_count_data_stream"`
+
 	// BulkResponseFilterPath sets the filter_path parameter of bulk API requests,
 	// which controls what data is returned in the response from Elasticsearch.
 	//
@@ -179,6 +185,17 @@ type DynamicIDSettings struct {
 }
 
 type DynamicPipelineSettings struct {
+	Enabled bool `mapstructure:"enabled"`
+
+	// prevent unkeyed literal initialization
+	_ struct{}
+}
+
+// ProfilesSampleCountDataStreamSettings configures the normalized profiles
+// data stream that profiles are additionally written to.
+type ProfilesSampleCountDataStreamSettings struct {
+	// Enabled enables writing profiles to a normalized "profiles-<dataset>-otel"
+	// data stream, in addition to the existing Universal Profiling indices.
 	Enabled bool `mapstructure:"enabled"`
 
 	// prevent unkeyed literal initialization

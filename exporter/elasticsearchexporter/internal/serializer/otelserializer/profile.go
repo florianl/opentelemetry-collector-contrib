@@ -7,10 +7,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pprofile"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/elasticsearchexporter/internal/elasticsearch"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/elasticsearchexporter/internal/lru"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/elasticsearchexporter/internal/serializer/otelserializer/serializeprofiles"
 )
@@ -25,10 +28,25 @@ const (
 	LeafFramesSymQueueIndex  = "profiling-sq-leafframes"
 
 	HostsMetadataIndex = "profiling-hosts"
+
+	// sampleCountDataStreamType is the fixed data_stream.type used for the
+	// normalized, OTel-native sample count data stream.
+	sampleCountDataStreamType = "profiles"
+	// sampleCountDataStreamNamespace is the fixed data_stream.namespace used
+	// for the normalized, OTel-native sample count data stream.
+	sampleCountDataStreamNamespace = "otel"
+
+	maxSampleCountDatasetBytes        = 100
+	disallowedSampleCountDatasetRunes = "-\\/*?\"<>| ,#:"
 )
 
 // SerializeProfile serializes a profile and calls the `pushData` callback for each generated document.
-func (s *Serializer) SerializeProfile(dic pprofile.ProfilesDictionary, resource pcommon.Resource, scope pcommon.InstrumentationScope, profile pprofile.Profile, pushData func(*bytes.Buffer, string, string) error) error {
+//
+// If includeSampleCountDataStream is true, a self-contained, normalized copy
+// of each stacktrace sample is additionally pushed to a
+// "profiles-<dataset>-otel" data stream, where <dataset> is derived from the
+// profile's period type and sample type (e.g. "cpu_nanoseconds_samples_count").
+func (s *Serializer) SerializeProfile(dic pprofile.ProfilesDictionary, resource pcommon.Resource, scope pcommon.InstrumentationScope, profile pprofile.Profile, includeSampleCountDataStream bool, pushData func(*bytes.Buffer, string, string) error) error {
 	err := s.createLRUs()
 	if err != nil {
 		return err
@@ -158,7 +176,7 @@ func (s *Serializer) SerializeProfile(dic pprofile.ProfilesDictionary, resource 
 		return err
 	}
 
-	return s.knownUnsymbolizedExecutables.WithLock(func(unsymbolizedExecutablesSet lru.LockedLRUSet) error {
+	err = s.knownUnsymbolizedExecutables.WithLock(func(unsymbolizedExecutablesSet lru.LockedLRUSet) error {
 		for i := range data {
 			payload := &data[i]
 			for _, executable := range payload.UnsymbolizedExecutables {
@@ -173,6 +191,63 @@ func (s *Serializer) SerializeProfile(dic pprofile.ProfilesDictionary, resource 
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	if !includeSampleCountDataStream {
+		return nil
+	}
+
+	events, err := serializeprofiles.SampleDSEvents(dic, resource, scope, profile)
+	if err != nil {
+		return err
+	}
+	if len(events) == 0 {
+		return nil
+	}
+
+	index := sampleCountDataStreamIndex(dic, profile)
+	for i := range events {
+		if err := pushDataAsJSON(&events[i], "", index); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// sampleCountDataStreamIndex builds the "profiles-<dataset>-otel" data
+// stream name for the normalized sample count events. <dataset> is derived
+// from the profile's period type and sample type. For sampling-based profiles
+// (sample type "samples/count") the period value is appended because different
+// sampling frequencies must land in different data streams, e.g.
+// "cpu_nanoseconds_samples_count_50000000" for a 20 Hz on-CPU profile.
+// For event-based profiles the period is irrelevant and omitted.
+func sampleCountDataStreamIndex(dic pprofile.ProfilesDictionary, profile pprofile.Profile) string {
+	sType, sUnit, pType, pUnit := serializeprofiles.SampleAndPeriodType(dic, profile)
+	raw := pType + "_" + pUnit + "_" + sType + "_" + sUnit
+	if sType == "samples" && sUnit == "count" {
+		raw += fmt.Sprintf("_%d", profile.Period())
+	}
+	dataset := sanitizeSampleCountDataset(raw)
+	return elasticsearch.NewDataStreamIndex(sampleCountDataStreamType, dataset, sampleCountDataStreamNamespace).Index
+}
+
+// sanitizeSampleCountDataset sanitizes dataset to apply the same restrictions
+// as data_stream.dataset elsewhere in the exporter, see
+// https://www.elastic.co/guide/en/ecs/current/ecs-data_stream.html
+func sanitizeSampleCountDataset(dataset string) string {
+	dataset = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(disallowedSampleCountDatasetRunes, r) {
+			return '_'
+		}
+		return unicode.ToLower(r)
+	}, dataset)
+	if len(dataset) > maxSampleCountDatasetBytes {
+		dataset = dataset[:maxSampleCountDatasetBytes]
+	}
+	return dataset
 }
 
 func toJSON(d any) (*bytes.Buffer, error) {

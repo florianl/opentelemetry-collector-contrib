@@ -86,6 +86,9 @@ func createDefaultConfig() component.Config {
 			LogFailedDocsInput:          false,
 			LogFailedDocsInputRateLimit: time.Second,
 		},
+		ProfilesSampleCountDataStream: ProfilesSampleCountDataStreamSettings{
+			Enabled: true,
+		},
 		IncludeSourceOnError: nil,
 	}
 }

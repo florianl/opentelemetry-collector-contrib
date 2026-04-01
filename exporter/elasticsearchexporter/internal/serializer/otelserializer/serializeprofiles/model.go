@@ -83,6 +83,70 @@ type StackFrame struct {
 	FunctionOffset []int32  `json:"Stackframe.function.offset,omitempty"`
 }
 
+// SampleCountFrame represents a single, possibly-inlined stack frame
+// embedded directly into a [SampleDSEvent].
+type SampleCountFrame struct {
+	FrameType    string   `json:"frame.type,omitempty"`
+	FunctionName []string `json:"function.name,omitempty"`
+	FileName     []string `json:"file.name,omitempty"`
+	LineNumber   []int32  `json:"line.number,omitempty"`
+}
+
+// SampleDSEvent represents a single, self-contained profiling sample event,
+// with the resolved stack inlined, for the normalized, OTel-native
+// "profiles-<dataset>-otel" data stream. Unlike [StackTraceEvent], which is
+// exploded into one document per unit of count and relies on separate
+// stacktraces/stackframes indices, a SampleDSEvent carries the real sample
+// value and stack in a single document.
+//
+// Resource and sample identity (host, service, container, k8s, thread, ...)
+// is not curated into named fields; instead, Attributes and SampleAttributes
+// carry the profile resource's and sample's attributes verbatim, so any
+// attribute present on the profile ends up in the document without this
+// struct needing to know about it.
+type SampleDSEvent struct {
+	Timestamp unixTime64
+	Value     int64
+	Period    int64
+	Stack     []SampleCountFrame
+
+	// Attributes holds the profile resource's attributes, flattened
+	// directly into the document with their original (dotted) names.
+	Attributes map[string]string
+
+	// SampleAttributes holds the sample's attributes, flattened directly
+	// into the document with their original (dotted) names. On conflict
+	// with Attributes, SampleAttributes wins.
+	SampleAttributes map[string]string
+}
+
+// MarshalJSON flattens Attributes and SampleAttributes directly into the
+// document, alongside SampleDSEvent's own fields.
+func (e SampleDSEvent) MarshalJSON() ([]byte, error) {
+	combined := make(map[string]any, len(e.Attributes)+len(e.SampleAttributes)+3)
+	for k, v := range e.Attributes {
+		if v == "" {
+			continue
+		}
+		combined[strings.ToLower(k)] = v
+	}
+	for k, v := range e.SampleAttributes {
+		if v == "" {
+			continue
+		}
+		combined[strings.ToLower(k)] = v
+	}
+
+	combined["@timestamp"] = e.Timestamp
+	combined["sample.value"] = e.Value
+	combined["period"] = e.Period
+	if len(e.Stack) > 0 {
+		combined["stack"] = e.Stack
+	}
+
+	return json.Marshal(combined)
+}
+
 // ResourceData represents the resources metadata related to a sample for the
 // profiling-hosts index.
 type ResourceData struct {

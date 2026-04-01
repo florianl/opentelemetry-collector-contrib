@@ -549,11 +549,12 @@ func (e *elasticsearchExporter) pushProfilesData(ctx context.Context, pd pprofil
 	stackTracesSession := startSession(e.bulkIndexers.profilingStackTraces)
 	stackFramesSession := startSession(e.bulkIndexers.profilingStackFrames)
 	executablesSession := startSession(e.bulkIndexers.profilingExecutables)
+	// profilingDataStreamSession is used for normalized profiles-<dataset>-otel data
+	// streams. It uses a dedicated indexer with requireDataStream=false so that
+	// Elasticsearch auto-creates the data stream from the index template on first
+	// write instead of requiring it to already exist.
+	profilingDataStreamSession := startSession(e.bulkIndexers.profilingDataStream)
 
-	// scopeMappingModeSessions is used to create the default session according to
-	// the specified mapping mode.
-	scopeMappingModeSessions := mappingModeSessions{indexers: &e.bulkIndexers.modes}
-	defer scopeMappingModeSessions.End()
 	dic := pd.Dictionary()
 
 	var errs []error
@@ -565,7 +566,6 @@ func (e *elasticsearchExporter) pushProfilesData(ctx context.Context, pd pprofil
 			if err != nil {
 				return err
 			}
-			defaultSession := scopeMappingModeSessions.StartSession(ctx, mappingMode)
 			encoder := e.documentEncoders[int(mappingMode)]
 
 			for _, profile := range sp.Profiles().All() {
@@ -576,7 +576,7 @@ func (e *elasticsearchExporter) pushProfilesData(ctx context.Context, pd pprofil
 					scopeSchemaURL:    sp.SchemaUrl(),
 				}
 				if err := e.pushProfileRecord(
-					ctx, encoder, ec, dic, profile, defaultSession, eventsSession,
+					ctx, encoder, ec, dic, profile, profilingDataStreamSession, eventsSession,
 					stackTracesSession, stackFramesSession, executablesSession,
 				); err != nil {
 					if cerr := ctx.Err(); cerr != nil {
@@ -603,15 +603,15 @@ func (e *elasticsearchExporter) pushProfilesData(ctx context.Context, pd pprofil
 	return errors.Join(errs...)
 }
 
-func (*elasticsearchExporter) pushProfileRecord(
+func (e *elasticsearchExporter) pushProfileRecord(
 	ctx context.Context,
 	encoder documentEncoder,
 	ec encodingContext,
 	dic pprofile.ProfilesDictionary,
 	profile pprofile.Profile,
-	defaultSession, eventsSession, stackTracesSession, stackFramesSession, executablesSession bulkIndexerSession,
+	dataStreamSession, eventsSession, stackTracesSession, stackFramesSession, executablesSession bulkIndexerSession,
 ) error {
-	return encoder.encodeProfile(ec, dic, profile, func(buf *bytes.Buffer, docID, index string) error {
+	return encoder.encodeProfile(ec, dic, profile, e.config.ProfilesSampleCountDataStream.Enabled, func(buf *bytes.Buffer, docID, index string) error {
 		switch index {
 		case otelserializer.StackTraceIndex:
 			return stackTracesSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionCreate)
@@ -627,7 +627,8 @@ func (*elasticsearchExporter) pushProfileRecord(
 			// These regular indices have a low write-frequency and can share the executablesSession.
 			return executablesSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionCreate)
 		default:
-			return defaultSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionCreate)
+			// Normalized profiles-<dataset>-otel data stream documents.
+			return dataStreamSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionCreate)
 		}
 	})
 }
